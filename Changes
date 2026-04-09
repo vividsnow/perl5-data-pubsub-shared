@@ -1,0 +1,7 @@
+Revision history for Data-PubSub-Shared
+
+0.02  2026-04-10
+    - XS::Parse::Keyword is now a required dependency
+
+0.01  2026-04-09
+    - Initial release
