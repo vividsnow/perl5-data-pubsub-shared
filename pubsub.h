@@ -200,9 +200,29 @@ static inline int pubsub_ensure_copy_buf(PubSubSub *sub, uint32_t needed) {
 #define PUBSUB_MUTEX_PID_MASK   0x7FFFFFFFU
 #define PUBSUB_MUTEX_VAL(pid)   (PUBSUB_MUTEX_WRITER_BIT | ((uint32_t)(pid) & PUBSUB_MUTEX_PID_MASK))
 
+/* A zombie (dead but not yet reaped) still answers kill(pid,0) as alive, so a
+ * process that crashed while holding the lock and lingers unreaped would never
+ * be recovered.  Treat /proc/<pid>/stat state 'Z' as dead.  Linux-only (as is
+ * this module); if /proc is unreadable we fall back to "alive" (safe: we never
+ * force-recover a possibly-live holder). */
+static inline int pubsub_pid_is_zombie(uint32_t pid) {
+    char path[32], buf[256];
+    snprintf(path, sizeof(path), "/proc/%u/stat", (unsigned)pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    /* "pid (comm) state ..."; comm may contain ')', so scan to the last one. */
+    char *rp = strrchr(buf, ')');
+    if (!rp || rp + 2 >= buf + n) return 0;   /* need ") X" within the bytes read */
+    return rp[1] == ' ' && rp[2] == 'Z';
+}
 static inline int pubsub_pid_alive(uint32_t pid) {
-    if (pid == 0) return 1;
-    return !(kill((pid_t)pid, 0) == -1 && errno == ESRCH);
+    if (pid == 0) return 1; /* no owner recorded, assume alive */
+    if (kill((pid_t)pid, 0) == -1 && errno == ESRCH) return 0; /* definitely dead */
+    return !pubsub_pid_is_zombie(pid); /* kill() also succeeds for a zombie -> treat as dead */
 }
 
 static const struct timespec pubsub_lock_timeout = { PUBSUB_LOCK_TIMEOUT_SEC, 0 };
@@ -283,6 +303,7 @@ static inline int pubsub_remaining_time(const struct timespec *deadline,
 
 static inline void pubsub_make_deadline(double timeout, struct timespec *deadline) {
     clock_gettime(CLOCK_MONOTONIC, deadline);
+    if (!(timeout < 1e9)) timeout = 1e9; /* clamp Inf/NaN/huge: avoid UB (time_t) cast -> instant spurious timeout */
     deadline->tv_sec += (time_t)timeout;
     deadline->tv_nsec += (long)((timeout - (double)(time_t)timeout) * 1e9);
     if (deadline->tv_nsec >= 1000000000L) {
@@ -317,7 +338,8 @@ static inline int pubsub_validate_header(PubSubHeader *hdr, uint32_t mode,
             return 0;
         uint64_t slots_end = hdr->slots_off + (uint64_t)hdr->capacity * slot_size;
         if (hdr->data_off < slots_end ||
-            hdr->data_off + hdr->arena_cap > hdr->total_size)
+            hdr->data_off > hdr->total_size ||
+            hdr->arena_cap > hdr->total_size - hdr->data_off)   /* overflow-safe: no data_off+arena_cap wrap */
             return 0;
     }
     return 1;
@@ -478,6 +500,10 @@ static PubSubHandle *pubsub_create(const char *path, uint32_t capacity,
             flock(fd, LOCK_UN); close(fd); return NULL;
         }
 
+        if (is_new && (st.st_uid != geteuid() || fchmod(fd, fmode) < 0)) {
+            PUBSUB_ERR("%s: refusing to initialize file not owned by us", path);
+            flock(fd, LOCK_UN); close(fd); return NULL;
+        }
         if (is_new) {
             if (ftruncate(fd, (off_t)total_size) < 0) {
                 PUBSUB_ERR("ftruncate(%s): %s", path, strerror(errno));
