@@ -8,6 +8,11 @@
 
 #include "XSParseKeyword.h"
 
+/* Narrow a Perl string length to the uint32 wire width WITHOUT silent truncation:
+ * a length that doesn't fit maps to UINT32_MAX so the downstream < 2 GiB size
+ * check croaks, instead of the value wrapping to a small, wrongly-accepted length. */
+#define LEN32(len) ((len) > (STRLEN)0xFFFFFFFFU ? 0xFFFFFFFFU : (uint32_t)(len))
+
 static int build_kw_1arg(pTHX_ OP **out, XSParseKeywordPiece *args[], size_t nargs, void *hookdata) {
     (void)nargs;
     const char *func = (const char *)hookdata;
@@ -78,6 +83,17 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
     if (!sv_isobject(sv) || !sv_derived_from(sv, classname)) \
         croak("Expected a %s object", classname); \
     PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(sv))); \
+    if (!h) croak("Attempted to use a destroyed %s object", classname); \
+    sv_2mortal(SvREFCNT_inc(SvRV(sv)))
+
+/* Re-read the handle after a call that can run Perl code (tied/overloaded
+ * argument magic, tied-array fetches).  That code may call $obj->DESTROY
+ * explicitly, which frees the handle and zeroes the IV; EXTRACT_HANDLE's
+ * mortal pins the referent only against refcount-driven destruction, not an
+ * explicit DESTROY, so the local `h` would dangle.  Used only where magic
+ * can actually intervene between EXTRACT_HANDLE and the first use of h. */
+#define REEXTRACT_HANDLE(classname, sv) \
+    h = INT2PTR(PubSubHandle*, SvIV(SvRV(sv))); \
     if (!h) croak("Attempted to use a destroyed %s object", classname)
 
 #define MAKE_OBJ(class, ptr) \
@@ -89,6 +105,17 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
     if (!sv_isobject(sv) || !sv_derived_from(sv, classname)) \
         croak("Expected a %s object", classname); \
     PubSubSub *sub = INT2PTR(PubSubSub*, SvIV(SvRV(sv))); \
+    if (!sub) croak("Attempted to use a destroyed %s object", classname); \
+    sv_2mortal(SvREFCNT_inc(SvRV(sv)))   /* pin the invocant across the method (reentrant-DESTROY UAF guard) */
+
+/* Re-read the subscriber after a call that can run Perl code (tied/overloaded
+ * argument magic, tied-array fetches).  That code may call $obj->DESTROY
+ * explicitly, which frees the subscriber and zeroes the IV; EXTRACT_SUB's
+ * mortal pins the referent only against refcount-driven destruction, not an
+ * explicit DESTROY, so the local `sub` would dangle.  Used only where magic
+ * can actually intervene between EXTRACT_SUB and the first use of sub. */
+#define REEXTRACT_SUB(classname, sv) \
+    sub = INT2PTR(PubSubSub*, SvIV(SvRV(sv))); \
     if (!sub) croak("Attempted to use a destroyed %s object", classname)
 
 MODULE = Data::PubSub::Shared  PACKAGE = Data::PubSub::Shared::Int
@@ -120,6 +147,7 @@ new(class, path, capacity, ...)
   CODE:
     mode_t fmode = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (mode_t)SvUV(ST(3)) : 0600;
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT, 0, fmode, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -134,6 +162,7 @@ new_memfd(class, name, capacity)
   PREINIT:
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT, 0, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int->new_memfd: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -197,6 +226,7 @@ publish_multi(self, ...)
         int64_t *vals = (int64_t *)alloca(count * sizeof(int64_t));
         for (uint32_t i = 0; i < count; i++)
             vals[i] = (int64_t)SvIV(ST(i + 1));
+        REEXTRACT_HANDLE("Data::PubSub::Shared::Int", self);
         RETVAL = pubsub_int_publish_multi(h, vals, count);
     }
   OUTPUT:
@@ -312,7 +342,7 @@ unlink(self_or_class, ...)
     SV *self_or_class
   CODE:
     const char *path;
-    if (sv_isobject(self_or_class)) {
+    if (sv_isobject(self_or_class) && sv_derived_from(self_or_class, "Data::PubSub::Shared::Int")) {
         PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(self_or_class)));
         if (!h) croak("Attempted to use a destroyed object");
         path = h->path;
@@ -423,7 +453,8 @@ poll_wait(self, ...)
     double timeout = -1;
     int64_t value;
   CODE:
-    if (items > 1) timeout = SvNV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) timeout = SvNV(ST(1));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
     int r = pubsub_int_poll_wait(sub, &value, timeout);
     if (r == 1)
         RETVAL = newSViv((IV)value);
@@ -440,7 +471,8 @@ drain(self, ...)
     int64_t value;
     uint32_t max_count;
   PPCODE:
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
     while (max_count-- > 0 && pubsub_int_poll(sub, &value))
         mXPUSHi((IV)value);
 
@@ -454,7 +486,8 @@ poll_wait_multi(self, count, ...)
     int64_t value;
   PPCODE:
     if (count == 0) XSRETURN(0);
-    if (items > 2) timeout = SvNV(ST(2));
+    if (items > 2 && (SvGETMAGIC(ST(2)), SvOK(ST(2)))) timeout = SvNV(ST(2));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
     if (!pubsub_int_poll_wait(sub, &value, timeout)) XSRETURN(0);
     mXPUSHi((IV)value);
     for (UV i = 1; i < count; i++) {
@@ -509,7 +542,11 @@ cursor(self, ...)
   PREINIT:
     EXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
   CODE:
-    if (items > 1) sub->cursor = (uint64_t)SvUV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) {
+        uint64_t new_cursor = (uint64_t)SvUV(ST(1));
+        REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
+        sub->cursor = new_cursor;
+    }
     RETVAL = (UV)sub->cursor;
   OUTPUT:
     RETVAL
@@ -569,7 +606,8 @@ drain_notify(self, ...)
     uint32_t max_count;
   PPCODE:
     pubsub_sub_eventfd_consume(sub);
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
     while (max_count-- > 0 && pubsub_int_poll(sub, &value))
         mXPUSHi((IV)value);
 
@@ -603,9 +641,10 @@ new(class, path, capacity, ...)
     char errbuf[PUBSUB_ERR_BUFLEN];
     uint32_t msg_size;
   CODE:
-    msg_size = (items > 3) ? (uint32_t)SvUV(ST(3)) : 0;
+    msg_size = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (uint32_t)SvUV(ST(3)) : 0;
     mode_t fmode = (items > 4 && (SvGETMAGIC(ST(4)), SvOK(ST(4)))) ? (mode_t)SvUV(ST(4)) : 0600;
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_STR, msg_size, fmode, errbuf);
     if (!h) croak("Data::PubSub::Shared::Str->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -621,7 +660,8 @@ new_memfd(class, name, capacity, ...)
     char errbuf[PUBSUB_ERR_BUFLEN];
     uint32_t msg_size;
   CODE:
-    msg_size = (items > 3) ? (uint32_t)SvUV(ST(3)) : 0;
+    msg_size = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (uint32_t)SvUV(ST(3)) : 0;
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_STR, msg_size, errbuf);
     if (!h) croak("Data::PubSub::Shared::Str->new_memfd: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -672,7 +712,8 @@ publish(self, value)
     SvGETMAGIC(value);   /* run get-magic/overload before reading the UTF8 flag */
     bool utf8 = SvUTF8(value) ? true : false;
     const char *str = SvPV_nomg(value, len);
-    int r = pubsub_str_publish(h, str, (uint32_t)len, utf8);
+    REEXTRACT_HANDLE("Data::PubSub::Shared::Str", self);
+    int r = pubsub_str_publish(h, str, LEN32(len), utf8);
     if (r == -1) croak("publish: message too long (%u > %u)", (unsigned)len, h->msg_size);
     RETVAL = &PL_sv_yes;
   OUTPUT:
@@ -686,6 +727,7 @@ publish_multi(self, ...)
   CODE:
     RETVAL = 0;
     uint32_t count = items - 1;
+    if (count > 8192) croak("publish_multi: too many values (%u > 8192)", count);
     if (count > 0) {
         /* Extract SV data BEFORE locking: SvPV(utf8) can run magic
          * (tied/overloaded stringification) that longjmps; doing it under
@@ -698,12 +740,21 @@ publish_multi(self, ...)
         for (uint32_t i = 0; i < count; i++) {
             SV *val = ST(i + 1);
             SvGETMAGIC(val);
+            STRLEN len;
+            const char *src = SvPV_nomg(val, len);
+            /* Copy bytes into a private mortal SV NOW: a LATER element's
+             * SvGETMAGIC (tied/overloaded) can run arbitrary Perl that
+             * grows/frees THIS element's PV, dangling src before the locked
+             * loop memcpys it. The mortal lives until FREETMPS after the loop. */
+            SV *copy = sv_2mortal(newSVpvn(src, len));
             args[i].utf8 = SvUTF8(val) ? true : false;
-            args[i].str = SvPV_nomg(val, args[i].len);
+            args[i].str = SvPVX_const(copy);
+            args[i].len = len;
         }
+        REEXTRACT_HANDLE("Data::PubSub::Shared::Str", self);
         pubsub_mutex_lock(h->hdr);
         for (uint32_t i = 0; i < count; i++) {
-            int r = pubsub_str_publish_locked(h, args[i].str, (uint32_t)args[i].len, args[i].utf8);
+            int r = pubsub_str_publish_locked(h, args[i].str, LEN32(args[i].len), args[i].utf8);
             if (r == -1) {
                 pubsub_mutex_unlock(h->hdr);
                 croak("publish_multi: message too long (%u > %u)", (unsigned)args[i].len, h->msg_size);
@@ -727,7 +778,8 @@ publish_notify(self, value)
     SvGETMAGIC(value);   /* run get-magic/overload before reading the UTF8 flag */
     bool utf8 = SvUTF8(value) ? true : false;
     const char *str = SvPV_nomg(value, len);
-    int r = pubsub_str_publish(h, str, (uint32_t)len, utf8);
+    REEXTRACT_HANDLE("Data::PubSub::Shared::Str", self);
+    int r = pubsub_str_publish(h, str, LEN32(len), utf8);
     if (r == -1) croak("publish_notify: message too long (%u > %u)", (unsigned)len, h->msg_size);
     pubsub_notify(h);
 
@@ -843,7 +895,7 @@ unlink(self_or_class, ...)
     SV *self_or_class
   CODE:
     const char *path;
-    if (sv_isobject(self_or_class)) {
+    if (sv_isobject(self_or_class) && sv_derived_from(self_or_class, "Data::PubSub::Shared::Str")) {
         PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(self_or_class)));
         if (!h) croak("Attempted to use a destroyed object");
         path = h->path;
@@ -964,7 +1016,8 @@ poll_wait(self, ...)
     uint32_t len;
     bool utf8;
   CODE:
-    if (items > 1) timeout = SvNV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) timeout = SvNV(ST(1));
+    REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
     int r = pubsub_str_poll_wait(sub, &str, &len, &utf8, timeout);
     if (r == 1) {
         RETVAL = newSVpvn(str, len);
@@ -985,7 +1038,8 @@ drain(self, ...)
     bool utf8;
     uint32_t max_count;
   PPCODE:
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
     while (max_count-- > 0 && pubsub_str_poll(sub, &str, &len, &utf8) == 1) {
         SV *sv = newSVpvn(str, len);
         if (utf8) SvUTF8_on(sv);
@@ -1004,7 +1058,8 @@ poll_wait_multi(self, count, ...)
     bool utf8;
   PPCODE:
     if (count == 0) XSRETURN(0);
-    if (items > 2) timeout = SvNV(ST(2));
+    if (items > 2 && (SvGETMAGIC(ST(2)), SvOK(ST(2)))) timeout = SvNV(ST(2));
+    REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
     if (pubsub_str_poll_wait(sub, &str, &len, &utf8, timeout) != 1) XSRETURN(0);
     {
         SV *sv = newSVpvn(str, len);
@@ -1065,7 +1120,11 @@ cursor(self, ...)
   PREINIT:
     EXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
   CODE:
-    if (items > 1) sub->cursor = (uint64_t)SvUV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) {
+        uint64_t new_cursor = (uint64_t)SvUV(ST(1));
+        REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
+        sub->cursor = new_cursor;
+    }
     RETVAL = (UV)sub->cursor;
   OUTPUT:
     RETVAL
@@ -1131,7 +1190,8 @@ drain_notify(self, ...)
     uint32_t max_count;
   PPCODE:
     pubsub_sub_eventfd_consume(sub);
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
     while (max_count-- > 0 && pubsub_str_poll(sub, &str, &len, &utf8) == 1) {
         SV *sv = newSVpvn(str, len);
         if (utf8) SvUTF8_on(sv);
@@ -1169,6 +1229,7 @@ new(class, path, capacity, ...)
   CODE:
     mode_t fmode = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (mode_t)SvUV(ST(3)) : 0600;
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT32, 0, fmode, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int32->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -1183,6 +1244,7 @@ new_memfd(class, name, capacity)
   PREINIT:
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT32, 0, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int32->new_memfd: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -1246,6 +1308,7 @@ publish_multi(self, ...)
         int32_t *vals = (int32_t *)alloca(count * sizeof(int32_t));
         for (uint32_t i = 0; i < count; i++)
             vals[i] = (int32_t)SvIV(ST(i + 1));
+        REEXTRACT_HANDLE("Data::PubSub::Shared::Int32", self);
         RETVAL = pubsub_int32_publish_multi(h, vals, count);
     }
   OUTPUT:
@@ -1361,7 +1424,7 @@ unlink(self_or_class, ...)
     SV *self_or_class
   CODE:
     const char *path;
-    if (sv_isobject(self_or_class)) {
+    if (sv_isobject(self_or_class) && sv_derived_from(self_or_class, "Data::PubSub::Shared::Int32")) {
         PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(self_or_class)));
         if (!h) croak("Attempted to use a destroyed object");
         path = h->path;
@@ -1472,7 +1535,8 @@ poll_wait(self, ...)
     double timeout = -1;
     int32_t value;
   CODE:
-    if (items > 1) timeout = SvNV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) timeout = SvNV(ST(1));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
     int r = pubsub_int32_poll_wait(sub, &value, timeout);
     if (r == 1)
         RETVAL = newSViv((IV)value);
@@ -1489,7 +1553,8 @@ drain(self, ...)
     int32_t value;
     uint32_t max_count;
   PPCODE:
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
     while (max_count-- > 0 && pubsub_int32_poll(sub, &value))
         mXPUSHi((IV)value);
 
@@ -1503,7 +1568,8 @@ poll_wait_multi(self, count, ...)
     int32_t value;
   PPCODE:
     if (count == 0) XSRETURN(0);
-    if (items > 2) timeout = SvNV(ST(2));
+    if (items > 2 && (SvGETMAGIC(ST(2)), SvOK(ST(2)))) timeout = SvNV(ST(2));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
     if (!pubsub_int32_poll_wait(sub, &value, timeout)) XSRETURN(0);
     mXPUSHi((IV)value);
     for (UV i = 1; i < count; i++) {
@@ -1558,7 +1624,11 @@ cursor(self, ...)
   PREINIT:
     EXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
   CODE:
-    if (items > 1) sub->cursor = (uint64_t)SvUV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) {
+        uint64_t new_cursor = (uint64_t)SvUV(ST(1));
+        REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
+        sub->cursor = new_cursor;
+    }
     RETVAL = (UV)sub->cursor;
   OUTPUT:
     RETVAL
@@ -1618,7 +1688,8 @@ drain_notify(self, ...)
     uint32_t max_count;
   PPCODE:
     pubsub_sub_eventfd_consume(sub);
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
     while (max_count-- > 0 && pubsub_int32_poll(sub, &value))
         mXPUSHi((IV)value);
 
@@ -1653,6 +1724,7 @@ new(class, path, capacity, ...)
   CODE:
     mode_t fmode = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (mode_t)SvUV(ST(3)) : 0600;
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT16, 0, fmode, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int16->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -1667,6 +1739,7 @@ new_memfd(class, name, capacity)
   PREINIT:
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
+    if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT16, 0, errbuf);
     if (!h) croak("Data::PubSub::Shared::Int16->new_memfd: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -1730,6 +1803,7 @@ publish_multi(self, ...)
         int16_t *vals = (int16_t *)alloca(count * sizeof(int16_t));
         for (uint32_t i = 0; i < count; i++)
             vals[i] = (int16_t)SvIV(ST(i + 1));
+        REEXTRACT_HANDLE("Data::PubSub::Shared::Int16", self);
         RETVAL = pubsub_int16_publish_multi(h, vals, count);
     }
   OUTPUT:
@@ -1845,7 +1919,7 @@ unlink(self_or_class, ...)
     SV *self_or_class
   CODE:
     const char *path;
-    if (sv_isobject(self_or_class)) {
+    if (sv_isobject(self_or_class) && sv_derived_from(self_or_class, "Data::PubSub::Shared::Int16")) {
         PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(self_or_class)));
         if (!h) croak("Attempted to use a destroyed object");
         path = h->path;
@@ -1956,7 +2030,8 @@ poll_wait(self, ...)
     double timeout = -1;
     int16_t value;
   CODE:
-    if (items > 1) timeout = SvNV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) timeout = SvNV(ST(1));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
     int r = pubsub_int16_poll_wait(sub, &value, timeout);
     if (r == 1)
         RETVAL = newSViv((IV)value);
@@ -1973,7 +2048,8 @@ drain(self, ...)
     int16_t value;
     uint32_t max_count;
   PPCODE:
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
     while (max_count-- > 0 && pubsub_int16_poll(sub, &value))
         mXPUSHi((IV)value);
 
@@ -1987,7 +2063,8 @@ poll_wait_multi(self, count, ...)
     int16_t value;
   PPCODE:
     if (count == 0) XSRETURN(0);
-    if (items > 2) timeout = SvNV(ST(2));
+    if (items > 2 && (SvGETMAGIC(ST(2)), SvOK(ST(2)))) timeout = SvNV(ST(2));
+    REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
     if (!pubsub_int16_poll_wait(sub, &value, timeout)) XSRETURN(0);
     mXPUSHi((IV)value);
     for (UV i = 1; i < count; i++) {
@@ -2042,7 +2119,11 @@ cursor(self, ...)
   PREINIT:
     EXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
   CODE:
-    if (items > 1) sub->cursor = (uint64_t)SvUV(ST(1));
+    if (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) {
+        uint64_t new_cursor = (uint64_t)SvUV(ST(1));
+        REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
+        sub->cursor = new_cursor;
+    }
     RETVAL = (UV)sub->cursor;
   OUTPUT:
     RETVAL
@@ -2102,7 +2183,8 @@ drain_notify(self, ...)
     uint32_t max_count;
   PPCODE:
     pubsub_sub_eventfd_consume(sub);
-    max_count = (items > 1) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    max_count = (items > 1 && (SvGETMAGIC(ST(1)), SvOK(ST(1)))) ? (uint32_t)SvUV(ST(1)) : UINT32_MAX;
+    REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
     while (max_count-- > 0 && pubsub_int16_poll(sub, &value))
         mXPUSHi((IV)value);
 
