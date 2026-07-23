@@ -90,11 +90,15 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
  * argument magic, tied-array fetches).  That code may call $obj->DESTROY
  * explicitly, which frees the handle and zeroes the IV; EXTRACT_HANDLE's
  * mortal pins the referent only against refcount-driven destruction, not an
- * explicit DESTROY, so the local `h` would dangle.  Used only where magic
+ * explicit DESTROY, so the local `h` would dangle.  The same Perl can also
+ * REPLACE the invocant ($obj = 42 mutates ST(0), because Perl passes
+ * aliases), hence the SvROK re-check before SvRV.  Used only where magic
  * can actually intervene between EXTRACT_HANDLE and the first use of h. */
 #define REEXTRACT_HANDLE(classname, sv) \
+    if (!SvROK(sv)) \
+        croak("%s object was replaced during the call", classname); \
     h = INT2PTR(PubSubHandle*, SvIV(SvRV(sv))); \
-    if (!h) croak("Attempted to use a destroyed %s object", classname)
+    if (!h) croak("%s object destroyed during the call", classname)
 
 #define MAKE_OBJ(class, ptr) \
     SV *ref = newRV_noinc(newSViv(PTR2IV(ptr))); \
@@ -112,11 +116,15 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
  * argument magic, tied-array fetches).  That code may call $obj->DESTROY
  * explicitly, which frees the subscriber and zeroes the IV; EXTRACT_SUB's
  * mortal pins the referent only against refcount-driven destruction, not an
- * explicit DESTROY, so the local `sub` would dangle.  Used only where magic
+ * explicit DESTROY, so the local `sub` would dangle.  The same Perl can also
+ * REPLACE the invocant ($obj = 42 mutates ST(0), because Perl passes
+ * aliases), hence the SvROK re-check before SvRV.  Used only where magic
  * can actually intervene between EXTRACT_SUB and the first use of sub. */
 #define REEXTRACT_SUB(classname, sv) \
+    if (!SvROK(sv)) \
+        croak("%s object was replaced during the call", classname); \
     sub = INT2PTR(PubSubSub*, SvIV(SvRV(sv))); \
-    if (!sub) croak("Attempted to use a destroyed %s object", classname)
+    if (!sub) croak("%s object destroyed during the call", classname)
 
 MODULE = Data::PubSub::Shared  PACKAGE = Data::PubSub::Shared::Int
 
@@ -212,6 +220,35 @@ publish(self, value)
     RETVAL = pubsub_int_publish(h, (int64_t)value);
   OUTPUT:
     RETVAL
+
+#ifdef PUBSUB_TEST_HOOKS
+
+void
+_publish_at(self, pos, value)
+    SV *self
+    UV pos
+    IV value
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int", self);
+  CODE:
+    /* test-only: commit at an explicit ring position WITHOUT advancing
+       write_pos, so a regression test can deterministically recreate the
+       lapped-publisher race. Compiled only with -DPUBSUB_TEST_HOOKS. */
+    pubsub_int_commit_at(h, (uint64_t)pos, (int64_t)value);
+
+UV
+_slot_seq(self, pos)
+    SV *self
+    UV pos
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int", self);
+  CODE:
+    /* test-only: raw slot sequence at a ring position (revert detection). */
+    RETVAL = (UV)((PubSubIntSlot *)h->slots)[pos & h->cap_mask].sequence;
+  OUTPUT:
+    RETVAL
+
+#endif
 
 UV
 publish_multi(self, ...)
@@ -592,6 +629,9 @@ poll_cb(self, cb)
         PUTBACK;
         call_sv(cb, G_DISCARD);
         FREETMPS; LEAVE;
+        /* call_sv ran arbitrary Perl: the callback may have DESTROYed or
+         * replaced the subscriber.  Re-extract before the next poll. */
+        REEXTRACT_SUB("Data::PubSub::Shared::Int::Sub", self);
         RETVAL++;
     }
   OUTPUT:
@@ -1174,6 +1214,9 @@ poll_cb(self, cb)
         PUTBACK;
         call_sv(cb, G_DISCARD);
         FREETMPS; LEAVE;
+        /* call_sv ran arbitrary Perl: the callback may have DESTROYed or
+         * replaced the subscriber.  Re-extract before the next poll. */
+        REEXTRACT_SUB("Data::PubSub::Shared::Str::Sub", self);
         RETVAL++;
     }
   OUTPUT:
@@ -1294,6 +1337,31 @@ publish(self, value)
     RETVAL = pubsub_int32_publish(h, (int32_t)value);
   OUTPUT:
     RETVAL
+
+#ifdef PUBSUB_TEST_HOOKS
+
+void
+_publish_at(self, pos, value)
+    SV *self
+    UV pos
+    IV value
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int32", self);
+  CODE:
+    pubsub_int32_commit_at(h, (uint64_t)pos, (int32_t)value);
+
+UV
+_slot_seq(self, pos)
+    SV *self
+    UV pos
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int32", self);
+  CODE:
+    RETVAL = (UV)((PubSubInt32Slot *)h->slots)[pos & h->cap_mask].sequence;
+  OUTPUT:
+    RETVAL
+
+#endif
 
 UV
 publish_multi(self, ...)
@@ -1674,6 +1742,9 @@ poll_cb(self, cb)
         PUTBACK;
         call_sv(cb, G_DISCARD);
         FREETMPS; LEAVE;
+        /* call_sv ran arbitrary Perl: the callback may have DESTROYed or
+         * replaced the subscriber.  Re-extract before the next poll. */
+        REEXTRACT_SUB("Data::PubSub::Shared::Int32::Sub", self);
         RETVAL++;
     }
   OUTPUT:
@@ -1789,6 +1860,31 @@ publish(self, value)
     RETVAL = pubsub_int16_publish(h, (int16_t)value);
   OUTPUT:
     RETVAL
+
+#ifdef PUBSUB_TEST_HOOKS
+
+void
+_publish_at(self, pos, value)
+    SV *self
+    UV pos
+    IV value
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int16", self);
+  CODE:
+    pubsub_int16_commit_at(h, (uint64_t)pos, (int16_t)value);
+
+UV
+_slot_seq(self, pos)
+    SV *self
+    UV pos
+  PREINIT:
+    EXTRACT_HANDLE("Data::PubSub::Shared::Int16", self);
+  CODE:
+    RETVAL = (UV)((PubSubInt16Slot *)h->slots)[pos & h->cap_mask].sequence;
+  OUTPUT:
+    RETVAL
+
+#endif
 
 UV
 publish_multi(self, ...)
@@ -2169,6 +2265,9 @@ poll_cb(self, cb)
         PUTBACK;
         call_sv(cb, G_DISCARD);
         FREETMPS; LEAVE;
+        /* call_sv ran arbitrary Perl: the callback may have DESTROYed or
+         * replaced the subscriber.  Re-extract before the next poll. */
+        REEXTRACT_SUB("Data::PubSub::Shared::Int16::Sub", self);
         RETVAL++;
     }
   OUTPUT:
