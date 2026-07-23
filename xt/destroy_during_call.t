@@ -10,7 +10,7 @@ plan skip_all => 'fork required' unless $Config{d_fork};
 # EXTRACT_HANDLE/EXTRACT_SUB and its first use of the C pointer.  If that
 # Perl calls $obj->DESTROY explicitly, the handle/subscriber is freed and
 # the IV zeroed mid-method.  The REEXTRACT_* calls must re-read the IV and
-# croak "Attempted to use a destroyed ... object" instead of dereferencing
+# croak "... object destroyed during the call" instead of dereferencing
 # the freed pointer.  Without them these cases segfault -- or, if the freed
 # memory is still mapped, run on through it and exit 7.  Both are failures.
 
