@@ -84,6 +84,7 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
         croak("Expected a %s object", classname); \
     PubSubHandle *h = INT2PTR(PubSubHandle*, SvIV(SvRV(sv))); \
     if (!h) croak("Attempted to use a destroyed %s object", classname); \
+    PubSubHandle *h0 = h; PERL_UNUSED_VAR(h0); \
     sv_2mortal(SvREFCNT_inc(SvRV(sv)))
 
 /* Re-read the handle after a call that can run Perl code (tied/overloaded
@@ -98,7 +99,7 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
     if (!SvROK(sv)) \
         croak("%s object was replaced during the call", classname); \
     h = INT2PTR(PubSubHandle*, SvIV(SvRV(sv))); \
-    if (!h) croak("%s object destroyed during the call", classname)
+    if (h != h0) croak("%s object replaced or destroyed during the call", classname)
 
 #define MAKE_OBJ(class, ptr) \
     SV *ref = newRV_noinc(newSViv(PTR2IV(ptr))); \
@@ -110,6 +111,7 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
         croak("Expected a %s object", classname); \
     PubSubSub *sub = INT2PTR(PubSubSub*, SvIV(SvRV(sv))); \
     if (!sub) croak("Attempted to use a destroyed %s object", classname); \
+    PubSubSub *sub0 = sub; PERL_UNUSED_VAR(sub0); \
     sv_2mortal(SvREFCNT_inc(SvRV(sv)))   /* pin the invocant across the method (reentrant-DESTROY UAF guard) */
 
 /* Re-read the subscriber after a call that can run Perl code (tied/overloaded
@@ -124,7 +126,7 @@ DEFINE_PS_KW(str, "Str", lag,     1, build_kw_1arg)
     if (!SvROK(sv)) \
         croak("%s object was replaced during the call", classname); \
     sub = INT2PTR(PubSubSub*, SvIV(SvRV(sv))); \
-    if (!sub) croak("%s object destroyed during the call", classname)
+    if (sub != sub0) croak("%s object replaced or destroyed during the call", classname)
 
 MODULE = Data::PubSub::Shared  PACKAGE = Data::PubSub::Shared::Int
 
