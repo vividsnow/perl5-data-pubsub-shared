@@ -28,6 +28,7 @@ t/08_clear.t
 t/09_compact.t
 t/10_publish_multi_safety.t
 t/11_arena_integrity.t
+t/12_recover.t
 t/pod_synopsis.t
 t/version_check.t
 typemap

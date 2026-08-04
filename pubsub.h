@@ -521,6 +521,26 @@ static PubSubHandle *pubsub_create(const char *path, uint32_t capacity,
 
         if (!is_new) {
             if (!pubsub_validate_header((PubSubHeader *)base, mode, (uint64_t)st.st_size)) {
+                /* Recover an abandoned mid-init file: a creator killed between the
+                 * ftruncate and pubsub_init_header below leaves a full-size, all-zero
+                 * (magic==0) file that would otherwise brick every future open of
+                 * this path.  Re-initialize it, but ONLY when it is exactly our
+                 * size, still uninitialized (magic==0), and owned by us -- a valid
+                 * or foreign file fails this and still errors, never clobbered. */
+                if (((PubSubHeader *)base)->magic == 0 && (uint64_t)st.st_size == total_size
+                    && st.st_uid == geteuid()) {
+                    if (fchmod(fd, fmode) < 0) {
+                        PUBSUB_ERR("%s: fchmod: %s", path, strerror(errno));
+                        munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
+                    }
+                    memset(base, 0, map_size);   /* start from a provably empty structure */
+                    pubsub_init_header(base, mode, cap, total_size, slots_off, data_off,
+                                        msg_size, arena_cap);
+                    flock(fd, LOCK_UN); close(fd);
+                    PubSubHandle *h = pubsub_init_handle(base, map_size, mode, path);
+                    if (!h) { munmap(base, map_size); return NULL; }
+                    return h;
+                }
                 PUBSUB_ERR("%s: invalid or incompatible pubsub file", path);
                 munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
             }
