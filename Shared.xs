@@ -159,7 +159,7 @@ new(class, path, capacity, ...)
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT, 0, fmode, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int->new: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int->new: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -174,7 +174,7 @@ new_memfd(class, name, capacity)
   CODE:
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT, 0, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int->new_memfd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int->new_memfd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -187,7 +187,7 @@ new_from_fd(class, fd)
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
     PubSubHandle *h = pubsub_open_fd(fd, PUBSUB_MODE_INT, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int->new_from_fd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int->new_from_fd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -688,7 +688,7 @@ new(class, path, capacity, ...)
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_STR, msg_size, fmode, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Str->new: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Str->new: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -705,7 +705,7 @@ new_memfd(class, name, capacity, ...)
     msg_size = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (uint32_t)SvUV(ST(3)) : 0;
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_STR, msg_size, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Str->new_memfd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Str->new_memfd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -718,7 +718,7 @@ new_from_fd(class, fd)
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
     PubSubHandle *h = pubsub_open_fd(fd, PUBSUB_MODE_STR, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Str->new_from_fd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Str->new_from_fd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1276,7 +1276,7 @@ new(class, path, capacity, ...)
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT32, 0, fmode, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int32->new: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int32->new: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1291,7 +1291,7 @@ new_memfd(class, name, capacity)
   CODE:
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT32, 0, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int32->new_memfd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int32->new_memfd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1304,7 +1304,7 @@ new_from_fd(class, fd)
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
     PubSubHandle *h = pubsub_open_fd(fd, PUBSUB_MODE_INT32, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int32->new_from_fd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int32->new_from_fd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1799,7 +1799,7 @@ new(class, path, capacity, ...)
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create(p, (uint32_t)capacity, PUBSUB_MODE_INT16, 0, fmode, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int16->new: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int16->new: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1814,7 +1814,7 @@ new_memfd(class, name, capacity)
   CODE:
     if (capacity > 0xFFFFFFFFU) croak("Data::PubSub::Shared->new: capacity exceeds 2^32");
     PubSubHandle *h = pubsub_create_memfd(name, (uint32_t)capacity, PUBSUB_MODE_INT16, 0, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int16->new_memfd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int16->new_memfd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
@@ -1827,7 +1827,7 @@ new_from_fd(class, fd)
     char errbuf[PUBSUB_ERR_BUFLEN];
   CODE:
     PubSubHandle *h = pubsub_open_fd(fd, PUBSUB_MODE_INT16, errbuf);
-    if (!h) croak("Data::PubSub::Shared::Int16->new_from_fd: %s", errbuf);
+    if (!h) croak("Data::PubSub::Shared::Int16->new_from_fd: %s", errbuf[0] ? errbuf : "out of memory");
     MAKE_OBJ(class, h);
   OUTPUT:
     RETVAL
