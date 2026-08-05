@@ -548,7 +548,6 @@ static PubSubHandle *pubsub_create(const char *path, uint32_t capacity,
                         PUBSUB_ERR("%s: fchmod: %s", path, strerror(errno));
                         munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
                     }
-                    memset(base, 0, map_size);   /* start from a provably empty structure */
                     pubsub_init_header(base, mode, cap, total_size, slots_off, data_off,
                                         msg_size, arena_cap);
                     flock(fd, LOCK_UN); close(fd);
