@@ -389,9 +389,10 @@ static void pubsub_init_header(void *base, uint32_t mode, uint32_t cap,
     hdr->msg_size  = msg_size;
     hdr->arena_cap = arena_cap;
     /* Publish magic LAST, as a release store: it is the commit point, so a
-       creator killed before this store leaves magic==0 -- which the
-       crashed-creator recovery treats as an abandoned mid-init file and
-       recovers, instead of a magic-set-but-incomplete header that would brick. */
+       creator killed before it leaves magic==0 and the file is never mistaken
+       for a valid one.  Recovery re-initializes such a file only while it is
+       still all-zero (a kill during the ftruncate or the zeroing above); a kill
+       during the few field stores leaves a file to remove by hand. */
     __atomic_store_n(&hdr->magic, PUBSUB_MAGIC, __ATOMIC_RELEASE);
 
 }
@@ -555,7 +556,11 @@ static PubSubHandle *pubsub_create(const char *path, uint32_t capacity,
                     if (!h) { munmap(base, map_size); return NULL; }
                     return h;
                 }
-                PUBSUB_ERR("%s: invalid or incompatible pubsub file", path);
+                if (((PubSubHeader *)base)->magic == 0 && (uint64_t)st.st_size == total_size
+                    && st.st_uid == geteuid())
+                    PUBSUB_ERR("%s: incomplete pubsub file left by an interrupted create; remove it and retry", path);
+                else
+                    PUBSUB_ERR("%s: invalid or incompatible pubsub file", path);
                 munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
             }
             flock(fd, LOCK_UN);
