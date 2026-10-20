@@ -22,7 +22,13 @@ jobs:
           perl-version: ${{ matrix.perl }}
 
       - name: Install deps
-        run: cpanm -n Devel::PPPort XS::Parse::Keyword
+        run: |
+          cpanm -n Devel::PPPort
+          if [ "${{ matrix.perl }}" = "5.22" ]; then
+            cpanm -n https://cpan.metacpan.org/authors/id/P/PE/PEVANS/XS-Parse-Keyword-0.40.tar.gz
+          else
+            cpanm -n XS::Parse::Keyword
+          fi
 
       - name: Build and test
         run: |
@@ -58,6 +64,8 @@ jobs:
           perl-version: '5.40'
       - run: cpanm -n Devel::PPPort XS::Parse::Keyword
       - run: perl Makefile.PL && make && make test
+      - name: Shared-memory author tests
+        run: AUTHOR_TESTING=1 prove -b xt/concurrent_integrity.t
 
   test-ubsan:
     runs-on: ubuntu-latest
@@ -85,7 +93,7 @@ jobs:
           perl-version: '5.40'
       - run: cpanm -n XS::Parse::Keyword Devel::PPPort BSD::Resource Time::HiRes
       - run: perl Makefile.PL && make
-      - run: AUTHOR_TESTING=1 prove -b -j2 xt/*.t
+      - run: AUTHOR_TESTING=1 prove -b xt/*.t
         env:
           AUTHOR_TESTING: 1
 
